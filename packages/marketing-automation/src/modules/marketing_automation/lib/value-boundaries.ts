@@ -3,6 +3,8 @@ import { MarketingValueBoundaries } from '../data/entities.js'
 import { EMPTY_VALUE_BOUNDARIES, RFM_BUCKETS } from './engine/rfm.js'
 import type { ValueBoundaries } from './engine/rfm.js'
 import { PLACED_ORDER_FILTER_SQL } from './order-filter.js'
+import { SALES_ORDERS } from './external/tables.js'
+import { hasSales } from './capabilities.js'
 
 /** Declared locally rather than imported from the document builder, which imports this file. */
 type BoundaryScope = { tenantId: string; organizationId: string }
@@ -38,7 +40,7 @@ const BOUNDARIES_SQL = `
            count(*)::int as order_count,
            sum(grand_total_gross_amount)::float8 as total_gross,
            extract(epoch from (now() - max(placed_at))) / 86400.0 as days_since_last
-      from sales_orders
+      from ${SALES_ORDERS}
      where customer_entity_id is not null
        and ${PLACED_ORDER_FILTER_SQL}
      group by customer_entity_id
@@ -78,6 +80,29 @@ export async function refreshValueBoundaries(
   scope: BoundaryScope,
   now: Date,
 ): Promise<ValueBoundaries> {
+  /**
+   * No `sales` module means no buyers to rank, which is the state the RFM minimum already handles.
+   *
+   * `buyerCount: 0` is honest here rather than a convenient zero: there genuinely are no buyers this
+   * installation could rank anybody against, and `computeRfm` withholds a score below
+   * `MINIMUM_BUYERS_FOR_RFM` — so nobody is scored 1-1-1 and swept into a win-back audience as "our worst
+   * customer".
+   */
+  /**
+   * No `sales` module: answer empty and persist NOTHING.
+   *
+   * Returning the zero-buyer shape was not enough. Writing it stores `computedAt: now`, and
+   * `refreshValueBoundariesIfStale` reads the STORED row to decide freshness — so one sweep tick during the
+   * state this probe exists to catch (sales enabled, migrations not yet applied) would pin `buyerCount: 0` as
+   * fresh for a full day. Every RFM and value audience would then enrol nobody for 24 hours, and a restart
+   * would not clear it because the staleness gate consults the row rather than the capability.
+   *
+   * Not persisting means the next tick simply asks again, which is what a transient state deserves.
+   */
+  // `computedAt: null` is part of the point: nothing was computed, so nothing may later read as fresh. Spread
+  // rather than returned by reference, so a caller cannot mutate the shared constant.
+  if (!(await hasSales(em))) return { ...EMPTY_VALUE_BOUNDARIES }
+
   const rows = await em.getConnection().execute<BoundariesRow[]>(
     BOUNDARIES_SQL,
     [scope.tenantId, scope.organizationId],
