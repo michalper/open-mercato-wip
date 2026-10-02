@@ -84,6 +84,9 @@ type PaletteStep = {
   descriptionKey: string | null
   channel: string | null
   uiFields: UiFieldSpec[]
+  /** False where the installation cannot run this step — an email step with no signing secret, for instance. */
+  available?: boolean
+  blockedReasonKey?: string | null
 }
 
 type PreviewEntry =
@@ -236,7 +239,19 @@ export default function CampaignEditorPage({ params }: { params?: { id?: string 
         setUpdatedAt(campaign.result.updatedAt)
         setTriggers(campaign.result.triggers ?? [])
         setDefinition(campaign.result.definition)
-        if (paletteResult.ok && paletteResult.result) setPalette(paletteResult.result)
+        /**
+         * A palette that failed to load is REPORTED, not shrugged off.
+         *
+         * `apiCall` resolves a non-ok response rather than throwing, so the catch below never saw a 400 from
+         * `organizationScopeRequiredResponse` or a 403 — and with `palette === null` the editor renders three
+         * headings over three empty boxes. The author gets a canvas they cannot add anything to, and nothing
+         * tells them why. The campaign's own load failure was handled ten lines up; this one was not.
+         */
+        if (paletteResult.ok && paletteResult.result) {
+          setPalette(paletteResult.result)
+        } else if (!cancelled) {
+          setError(t('marketing_automation.errors.paletteLoadFailed', 'Could not load the step and trigger palette, so this campaign cannot be edited right now.'))
+        }
       } catch {
         if (!cancelled) setError(t('marketing_automation.errors.loadFailed', 'Could not load the campaign.'))
       } finally {
@@ -979,16 +994,32 @@ export default function CampaignEditorPage({ params }: { params?: { id?: string 
                 </div>
               ) : null}
               <div className="space-y-1">
-                {(palette?.steps ?? []).map((step) => (
-                  <Button
-                    key={step.type}
-                    variant="outline"
-                    className="w-full justify-start"
-                    onClick={() => addStep(step.type)}
-                  >
-                    <span className="truncate">{t(step.labelKey, step.type)}</span>
-                  </Button>
-                ))}
+                {(palette?.steps ?? []).map((step) => {
+                  const blocked = step.available === false
+                  return (
+                    <div key={step.type}>
+                      <Button
+                        variant="outline"
+                        className="w-full justify-start"
+                        disabled={blocked}
+                        onClick={() => addStep(step.type)}
+                      >
+                        <span className="truncate">{t(step.labelKey, step.type)}</span>
+                      </Button>
+                      {/*
+                        The reason is VISIBLE, not a tooltip.
+                        
+                        A blocked trigger explains itself through `title`, which is hover-only and therefore
+                        invisible on a touch screen and to anybody who does not think to hover a disabled
+                        control. An author who cannot see why "Send email" is greyed out will assume the module
+                        is broken. Two lines of text beat a tooltip here.
+                      */}
+                      {blocked && step.blockedReasonKey ? (
+                        <div className="mt-1 text-xs text-muted-foreground">{t(step.blockedReasonKey, '')}</div>
+                      ) : null}
+                    </div>
+                  )
+                })}
               </div>
             </div>
           </aside>

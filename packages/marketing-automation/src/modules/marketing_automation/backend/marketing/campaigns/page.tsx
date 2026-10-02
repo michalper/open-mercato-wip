@@ -6,6 +6,7 @@ import { Page, PageBody } from '@open-mercato/ui/backend/Page'
 import { DataTable } from '@open-mercato/ui/backend/DataTable'
 import { ErrorMessage } from '@open-mercato/ui/backend/detail'
 import { BooleanIcon } from '@open-mercato/ui/backend/ValueIcons'
+import { StatusBadge } from '@open-mercato/ui/primitives/status-badge'
 import { ListEmptyState } from '@open-mercato/ui/backend/filters/ListEmptyState'
 import { RowActions, type RowActionItem } from '@open-mercato/ui/backend/RowActions'
 import type { LegacyColumnDef as ColumnDef } from '@tanstack/react-table/legacy'
@@ -40,6 +41,8 @@ type CampaignRow = {
   id: string
   name: string
   isEnabled: boolean
+  /** Set when the deliverability breaker switched it off; null when a person did, or nobody has. */
+  breakerTrippedAt?: string | null
   stepCount: number
   triggerSummary: string
   updatedAt: string
@@ -264,7 +267,20 @@ export default function CampaignsListPage() {
     {
       accessorKey: 'isEnabled',
       header: t('marketing_automation.list.columns.enabled', 'Enabled'),
-      cell: ({ row }) => <BooleanIcon value={row.original.isEnabled} />,
+      /**
+       * An automatic pause reads differently from a deliberate one.
+       *
+       * Both used to render the same plain off icon, so the obvious action — switch it back on — was the one the
+       * breaker undoes on the next sweep. An operator could fight their own guardrail without being told it was
+       * there, because the notification that said so is read once and dismissed.
+       */
+      cell: ({ row }) => (row.original.breakerTrippedAt && !row.original.isEnabled ? (
+        <StatusBadge variant="warning">
+          {t('marketing_automation.list.pausedByBreaker', 'Paused automatically')}
+        </StatusBadge>
+      ) : (
+        <BooleanIcon value={row.original.isEnabled} />
+      )),
     },
     {
       accessorKey: 'triggerSummary',
@@ -296,6 +312,23 @@ export default function CampaignsListPage() {
       },
     },
   ], [t, router])
+
+  /**
+   * The empty state is ROUTED to the readiness checklist, not merely descriptive.
+   *
+   * This is the first marketing screen anybody opens, and it used to explain what a campaign IS and stop there
+   * — on an installation that may not be able to send at all. The checklist exists to answer exactly that, and
+   * nothing in the module linked to it, so the one screen written for this moment was reachable only by
+   * guessing it was in the nav.
+   */
+  const emptyState = (
+    <ListEmptyState
+      title={t('marketing_automation.list.empty.title', 'No campaigns yet')}
+      description={t('marketing_automation.list.empty.description', 'A campaign reacts to something that happens, decides who it applies to, and then runs a series of steps.')}
+      createHref="/backend/marketing/setup"
+      createLabel={t('marketing_automation.list.empty.action', 'Check what this installation needs')}
+    />
+  )
 
   return (
     <Page>
@@ -369,12 +402,7 @@ export default function CampaignsListPage() {
               pageSizeOptions: [10, 25, 50, 100],
               onPageSizeChange: (next) => { setPageSize(next); setPage(1) },
             }}
-            emptyState={(
-              <ListEmptyState
-                title={t('marketing_automation.list.empty.title', 'No campaigns yet')}
-                description={t('marketing_automation.list.empty.description', 'A campaign reacts to something that happens, decides who it applies to, and then runs a series of steps.')}
-              />
-            )}
+            emptyState={emptyState}
           />
         )}
         {ConfirmDialogElement}

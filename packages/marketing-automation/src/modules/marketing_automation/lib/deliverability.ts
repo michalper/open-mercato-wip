@@ -107,6 +107,19 @@ export async function applyDeliverabilityGuardrails(
       ctx: buildCampaignCommandContext(container, scope),
     })
 
+    /**
+     * Stamped AFTER the command, and outside it on purpose.
+     *
+     * `set_enabled` is the shared write and must not grow a breaker-specific argument — `auto-winner` calls the
+     * same command. The stamp is this function's own bookkeeping: the pause already happened, and a failure here
+     * costs a badge rather than a guardrail.
+     */
+    await em.nativeUpdate(
+      MarketingCampaign,
+      { id: campaign.id, tenantId: scope.tenantId, organizationId: scope.organizationId },
+      { breakerTrippedAt: new Date() },
+    )
+
     tripped.push({ campaignId: campaign.id, campaignName: campaign.name, decision })
   }
 
@@ -159,7 +172,15 @@ export async function announceBreaker(
         rate: String(Math.round(outcome.decision.failureRate * 100)),
         attempts: String(outcome.decision.attempts),
       },
-      severity: 'error',
+      /**
+       * `warning`, matching what `notifications.ts` DECLARES for this type.
+       *
+       * The emitter passed `error` while the declaration says `warning`, so the same notification had two
+       * severities depending on which file you read — and the declaration's own comment explains the choice
+       * ("warning rather than info, and it does not expire while it is still true"). A campaign the module paused
+       * on purpose is a thing somebody must act on, not a thing that broke.
+       */
+      severity: 'warning',
       sourceModule: 'marketing_automation',
       linkHref: `/backend/marketing/campaigns/${outcome.campaignId}`,
       // One notice per campaign: a repeat pass must not stack alerts about the same pause.
