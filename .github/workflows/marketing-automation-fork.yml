@@ -219,6 +219,16 @@ jobs:
       - name: Build app
         run: yarn build:app
 
+      # A build's own scratch directory must not travel to another job.
+      #
+      # `agentic-build-artifacts.test.ts` asserts that `packages/cli/dist` holds no `agentic.staging` after a
+      # completed build. That is a reasonable thing to check and it passes in the build job — but this artifact
+      # carries `dist` into the unit-test job, so a staging directory the build left behind arrives there and
+      # fails a test about a build that job never ran. Two different reds in two attempts came from this gate's
+      # own plumbing rather than from the code under test, which makes a red run unreadable.
+      #
+      # The exclusions live inside the block scalar, where every line is a PATTERN: a `#` line there would be
+      # taken as a path to upload, not as a comment, which is why this explanation sits out here.
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -227,6 +237,8 @@ jobs:
             packages/*/dist/
             packages/*/generated/
             apps/mercato/.mercato/generated/
+            !packages/*/dist/agentic.staging/**
+            !packages/*/dist/**/*.staging/**
           retention-days: 1
           if-no-files-found: error
 
