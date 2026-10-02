@@ -1,4 +1,6 @@
 import { NextResponse } from 'next/server'
+import { UniqueConstraintViolationException } from '@mikro-orm/core'
+import { organizationScopeRequiredResponse, resolveActiveOrganizationId } from '@open-mercato/shared/lib/auth/organizationScope'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { getAuthFromRequest } from '@open-mercato/shared/lib/auth/server'
 import { createRequestContainer } from '@open-mercato/shared/lib/di/container'
@@ -21,6 +23,14 @@ const routeMetadata = {
   POST: { requireAuth: true, requireFeatures: ['marketing_automation.campaigns.manage'] },
 }
 
+/**
+ * How many times a losing insert re-derives its slug before the name is the author's problem.
+ *
+ * Small on purpose: this only runs when two writes collide on the same name at the same instant,
+ * and a name that collides five times in a row is a naming problem rather than a race.
+ */
+const SLUG_INSERT_ATTEMPTS = 5
+
 export const metadata = routeMetadata
 
 const MAX_PAGE_SIZE = 100
@@ -38,7 +48,17 @@ function present(segment: MarketingSegment) {
 
 export async function GET(req: Request) {
   const auth = await getAuthFromRequest(req)
-  if (!auth?.tenantId || !auth.orgId) return NextResponse.json({ items: [], total: 0 }, { status: 401 })
+  if (!auth?.tenantId) return NextResponse.json({ items: [], total: 0 }, { status: 401 })
+  /**
+   * A scope that cannot be resolved is a 400, never a 401.
+   *
+   * `apiFetch` reads 401 as an expired session: it refreshes, succeeds, returns to the same page and
+   * refreshes again — so answering 401 for "All organizations" did not fail, it looped for ever. The
+   * resolver also recovers the actor's own organization where that is still the actor's tenant, which is
+   * what keeps a super-admin's own configuration visible instead of unreachable.
+   */
+  const organizationId = resolveActiveOrganizationId(auth)
+  if (!organizationId) return organizationScopeRequiredResponse()
 
   const url = new URL(req.url)
   const pageSize = Math.min(Math.max(Number.parseInt(url.searchParams.get('pageSize') ?? '50', 10) || 50, 1), MAX_PAGE_SIZE)
@@ -53,7 +73,7 @@ export async function GET(req: Request) {
 
   const container = await createRequestContainer()
   const em = container.resolve<EntityManager>('em')
-  const scope = { tenantId: auth.tenantId, organizationId: auth.orgId }
+  const scope = { tenantId: auth.tenantId, organizationId }
 
   const [items, total] = await em.findAndCount(
     MarketingSegment,
@@ -66,7 +86,11 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   const auth = await getAuthFromRequest(req)
-  if (!auth?.tenantId || !auth.orgId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!auth?.tenantId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  // A scope that cannot be resolved is a 400, never a 401: `apiFetch` reads 401 as an expired session and
+  // loops. See the first guard in this file.
+  const organizationId = resolveActiveOrganizationId(auth)
+  if (!organizationId) return organizationScopeRequiredResponse()
 
   const parsed = segmentCreateSchema.safeParse(await req.json().catch(() => null))
   if (!parsed.success) {
@@ -91,7 +115,7 @@ export async function POST(req: Request) {
 
   const container = await createRequestContainer()
   const em = container.resolve<EntityManager>('em')
-  const scope = { tenantId: auth.tenantId, organizationId: auth.orgId }
+  const scope = { tenantId: auth.tenantId, organizationId }
 
   /**
    * The slug is derived once, here, and never changes again.
@@ -137,17 +161,45 @@ export async function POST(req: Request) {
     )
   }
 
-  const segment = em.create(MarketingSegment, {
-    ...scope,
-    slug,
-    name: parsed.data.name,
-    description: parsed.data.description ?? null,
-    expression: (parsed.data.expression ?? null) as Record<string, unknown> | null,
-  })
-  em.persist(segment)
-  await em.flush()
+  /**
+   * The insert retries, because the lookup above cannot win a race it does not take part in.
+   *
+   * Deriving the slug was lookup-then-insert: two people creating "VIP" at the same moment both found the slug
+   * free and both inserted, and the unique index answered 500 to whichever lost — reachable by double-clicking
+   * submit. Losing that race is not a failure, it is the index doing its job, so the loser takes the next
+   * suffix and tries again. Same shape as `lib/preferences.ts`, which treats its own unique violation as the
+   * other write having already stored what this one meant to.
+   */
+  let candidate = slug
+  for (let attempt = 0; attempt < SLUG_INSERT_ATTEMPTS; attempt += 1) {
+    const segment = em.create(MarketingSegment, {
+      ...scope,
+      slug: candidate,
+      name: parsed.data.name,
+      description: parsed.data.description ?? null,
+      expression: (parsed.data.expression ?? null) as Record<string, unknown> | null,
+    })
+    try {
+      em.persist(segment)
+      await em.flush()
+      return NextResponse.json(present(segment))
+    } catch (error) {
+      // Only a slug collision is retried. Everything else is a real failure and must not be swallowed into
+      // "please give it a more distinct name".
+      if (!(error instanceof UniqueConstraintViolationException)) throw error
+      em.clear()
+      const suffix = `-${attempt + 2}`
+      candidate = `${base.slice(0, 64 - suffix.length)}${suffix}`
+    }
+  }
 
-  return NextResponse.json(present(segment))
+  return NextResponse.json(
+    {
+      error: 'Too many segments share this name — please give it a more distinct one',
+      code: 'marketing_automation.errors.segmentSlug',
+    },
+    { status: 400 },
+  )
 }
 
 export const openApi = {

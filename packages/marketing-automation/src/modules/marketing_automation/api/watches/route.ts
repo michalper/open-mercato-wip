@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { organizationScopeRequiredResponse, resolveActiveOrganizationId } from '@open-mercato/shared/lib/auth/organizationScope'
 import { z } from 'zod'
 import type { EntityManager } from '@mikro-orm/postgresql'
 import { getAuthFromRequest } from '@open-mercato/shared/lib/auth/server'
@@ -19,6 +20,9 @@ const routeMetadata = {
   POST: { requireAuth: true, requireFeatures: ['marketing_automation.campaigns.manage'] },
 }
 
+/** The platform's ceiling, which `AGENTS.md` sets at 100. */
+const MAX_WATCH_PAGE_SIZE = 100
+
 export const metadata = routeMetadata
 
 const createSchema = z.object({
@@ -32,14 +36,32 @@ type DemandRow = { sku: string; watchers: string; notified: string }
 
 export async function GET(req: Request) {
   const auth = await getAuthFromRequest(req)
-  if (!auth?.tenantId || !auth.orgId) return NextResponse.json({ items: [] }, { status: 401 })
+  if (!auth?.tenantId) return NextResponse.json({ items: [] }, { status: 401 })
+  /**
+   * A scope that cannot be resolved is a 400, never a 401.
+   *
+   * `apiFetch` reads 401 as an expired session: it refreshes, succeeds, returns to the same page and
+   * refreshes again — so answering 401 for "All organizations" did not fail, it looped for ever. The
+   * resolver also recovers the actor's own organization where that is still the actor's tenant, which is
+   * what keeps a super-admin's own configuration visible instead of unreachable.
+   */
+  const organizationId = resolveActiveOrganizationId(auth)
+  if (!organizationId) return organizationScopeRequiredResponse()
 
   const url = new URL(req.url)
-  const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), 200)
+  /**
+   * Capped at the platform's page size, not above it.
+   *
+   * `AGENTS.md` keeps `pageSize` at or below 100, and this route let a caller ask for 200 — so the one screen
+   * that reads it asked for twice the ceiling every time it loaded. The cap is the limit, not a suggestion:
+   * a client that asks for more gets 100 rather than an error, because the number is a page size and not a
+   * request anybody needs refused.
+   */
+  const limit = Math.min(Math.max(Number.parseInt(url.searchParams.get('limit') ?? '50', 10) || 50, 1), MAX_WATCH_PAGE_SIZE)
 
   const container = await createRequestContainer()
   const em = container.resolve<EntityManager>('em')
-  const scope = { tenantId: auth.tenantId, organizationId: auth.orgId }
+  const scope = { tenantId: auth.tenantId, organizationId }
 
   const rows = await em.getConnection().execute<DemandRow[]>(
     `select sku,
@@ -64,7 +86,11 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   const auth = await getAuthFromRequest(req)
-  if (!auth?.tenantId || !auth.orgId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  if (!auth?.tenantId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  // A scope that cannot be resolved is a 400, never a 401: `apiFetch` reads 401 as an expired session and
+  // loops. See the first guard in this file.
+  const organizationId = resolveActiveOrganizationId(auth)
+  if (!organizationId) return organizationScopeRequiredResponse()
 
   const parsed = createSchema.safeParse(await req.json().catch(() => null))
   if (!parsed.success) {
@@ -80,7 +106,7 @@ export async function POST(req: Request) {
 
   const container = await createRequestContainer()
   const em = container.resolve<EntityManager>('em')
-  const scope = { tenantId: auth.tenantId, organizationId: auth.orgId }
+  const scope = { tenantId: auth.tenantId, organizationId }
 
   // Checked in THIS tenant: the id arrived in a request, and a watch against somebody else's customer would
   // mail a stranger about a price.
