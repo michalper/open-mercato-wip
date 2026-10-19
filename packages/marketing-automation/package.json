@@ -67,7 +67,7 @@
     "@open-mercato/events": "workspace:*",
     "@open-mercato/queue": "workspace:*",
     "@open-mercato/telemetry": "workspace:*",
-    "@xyflow/react": "^12.11.5"
+    "@xyflow/react": "^12.12.0"
   },
   "peerDependencies": {
     "@mikro-orm/core": "^7.1.14",
@@ -76,7 +76,7 @@
     "@open-mercato/core": "workspace:*",
     "@open-mercato/shared": "workspace:*",
     "@open-mercato/ui": "workspace:*",
-    "ai": "^7.0.83",
+    "ai": "^7.0.140",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zod": ">=3.23.0"
@@ -87,14 +87,14 @@
     "@open-mercato/shared": "workspace:*",
     "@open-mercato/ui": "workspace:*",
     "@types/jest": "^30.0.0",
-    "@types/node": "^26.4.0",
-    "@types/react": "^19.2.18",
-    "ai": "^7.0.83",
-    "jest": "^30.4.2",
-    "jest-environment-jsdom": "^30.4.1",
-    "react": "19.2.8",
-    "react-dom": "19.2.8",
-    "ts-jest": "^29.4.12",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "ai": "^7.0.140",
+    "jest": "^30.5.2",
+    "jest-environment-jsdom": "^30.5.2",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "ts-jest": "^29.4.14",
     "typescript": "7.0.2"
   },
   "publishConfig": {
